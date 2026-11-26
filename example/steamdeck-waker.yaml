@@ -1,0 +1,149 @@
+# =============================================================================
+# Steam Deck BLE waker + Home Assistant Bluetooth proxy on a single ESP32
+# =============================================================================
+# - bluetooth_proxy: feeds Home Assistant (Bermuda, PadSpan, Private BLE Device...)
+# - deck_waker:      BLE HID keyboard that wakes / suspends a Steam Deck OLED
+#
+# Tested on a classic ESP32 (ESP32-WROOM-32, 4 MB) with ESPHome 2026.11.0
+# (ESP-IDF 5.5.6). The ESP-IDF framework is required.
+# =============================================================================
+
+substitutions:
+  name: steamdeck-waker
+  friendly_name: Steam Deck Waker
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    priority: -100
+    then:
+      # Apply the "Wake attempts" value restored from flash
+      - lambda: id(waker).set_direct_attempts((uint8_t) id(wake_attempts).state);
+
+esp32:
+  variant: esp32
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret wifi_ap_password
+
+captive_portal:
+
+external_components:
+  - source: github://YOUR_GITHUB_USER/esphome-steamdeck-waker@main
+    components: [deck_waker]
+    refresh: 1d
+
+# Bluedroid stack shared by the proxy and the HID keyboard.
+# The GAP device name is the name the Steam Deck shows when pairing.
+esp32_ble:
+  name: "Steam Deck Waker"
+  io_capability: none
+  auth_req_mode: sc_bond
+  max_connections: 4   # 3 proxy connection slots + 1 for the HID link
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+
+bluetooth_proxy:
+  active: true
+  connection_slots: 3
+
+deck_waker:
+  id: waker
+  name: "Steam Deck Waker"   # advertised name while pairing
+  direct_attempts: 8         # default; overridden at runtime by "Wake attempts"
+  pause_scanner: true        # pause the proxy scanner while knocking
+
+number:
+  - platform: template
+    id: wake_attempts
+    name: "Wake attempts"
+    icon: mdi:repeat
+    entity_category: config
+    mode: box
+    min_value: 1
+    max_value: 20
+    step: 1
+    initial_value: 8
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: id(waker).set_direct_attempts((uint8_t) x);
+
+button:
+  - platform: template
+    name: "Wake Steam Deck"
+    icon: mdi:power
+    on_press:
+      - lambda: id(waker).wake();
+  - platform: template
+    name: "Suspend Steam Deck"
+    icon: mdi:sleep
+    on_press:
+      - lambda: id(waker).sleep_host();
+  # Optional: HID "System Power Down" (Linux KEY_POWER). Not needed on SteamOS,
+  # where "Suspend Steam Deck" (KEY_SLEEP) works; kept as an example.
+  # - platform: template
+  #   name: "Power key Steam Deck"
+  #   icon: mdi:power-standby
+  #   on_press:
+  #     - lambda: id(waker).power_key();
+  - platform: template
+    name: "Pairing mode (2 min)"
+    icon: mdi:bluetooth-settings
+    entity_category: config
+    on_press:
+      - lambda: id(waker).start_pairing_mode(120);
+  - platform: template
+    name: "Forget BLE pairings"
+    icon: mdi:link-off
+    entity_category: config
+    on_press:
+      - lambda: id(waker).clear_bonds();
+  - platform: restart
+    name: "Restart"
+    entity_category: config
+
+binary_sensor:
+  - platform: template
+    name: "Steam Deck connected"
+    icon: mdi:steam
+    lambda: return id(waker).is_connected();
+
+text_sensor:
+  - platform: template
+    name: "Paired host"
+    icon: mdi:bluetooth-connect
+    entity_category: diagnostic
+    update_interval: 30s
+    lambda: return id(waker).bonded_peer_str();
+  - platform: version
+    name: "ESPHome version"
+    entity_category: diagnostic
+
+sensor:
+  - platform: wifi_signal
+    name: "Wi-Fi signal"
+    update_interval: 60s
+    entity_category: diagnostic
+  - platform: uptime
+    name: "Uptime"
+    entity_category: diagnostic
